@@ -26,6 +26,19 @@ app.secret_key = 'irregular-verbs-quiz-secret-key'
 DB_PATH = Path('data/app.db')
 
 
+def ensure_db():
+    """Crée la base de données si elle n'existe pas."""
+    if DB_PATH.exists():
+        return
+    from setup import init_database
+    logger.info("Base de données absente, initialisation automatique...")
+    init_database()
+
+
+# Auto-init au démarrage
+ensure_db()
+
+
 def get_db():
     """Connexion à la base de données avec réutilisation par requête."""
     if 'db' not in g:
@@ -70,11 +83,6 @@ def get_verbs():
 
 
 if __name__ == '__main__':
-    if not DB_PATH.exists():
-        logger.error(f"Base de données introuvable: {DB_PATH}")
-        logger.info("Exécutez 'python setup.py' d'abord")
-        exit(1)
-
     port = int(os.getenv('PORT', 5000))
     logger.info(f"Démarrage sur le port {port}")
     app.run(debug=True, port=port, host='0.0.0.0')

@@ -101,6 +101,34 @@ def init_database():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_infinitive ON verbs(infinitive)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_french ON verbs(french)")
 
+    # Table des sessions de quiz
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed_at TIMESTAMP,
+            mode TEXT DEFAULT 'random',
+            total_verbs INTEGER DEFAULT 0,
+            total_correct INTEGER DEFAULT 0,
+            total_errors INTEGER DEFAULT 0,
+            rounds INTEGER DEFAULT 0,
+            pause_state TEXT
+        )
+    """)
+
+    # Table des erreurs par session (quels verbes ont posé problème)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL REFERENCES sessions(id),
+            verb_id INTEGER NOT NULL REFERENCES verbs(id),
+            error_count INTEGER DEFAULT 1
+        )
+    """)
+
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_errors_session ON session_errors(session_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_errors_verb ON session_errors(verb_id)")
+
     conn.commit()
     conn.close()
 

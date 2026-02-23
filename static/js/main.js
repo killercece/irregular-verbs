@@ -1,6 +1,6 @@
 /**
  * Irregular Verbs Quiz
- * Logique du quiz avec système de rounds
+ * Logique du quiz avec système de rounds, tracking et pause/reprise
  */
 
 // === ÉTAT ===
@@ -15,12 +15,14 @@ let roundTotal = 0;
 let globalCorrect = 0;
 let globalTotal = 0;
 let answered = false;
-let settings = { count: 20, mode: 'random' };
+let sessionId = null;
+let errorTracker = {}; // { verb_id: count }
 
 // === INITIALISATION ===
-document.addEventListener('DOMContentLoaded', () => {
-    loadVerbs();
+document.addEventListener('DOMContentLoaded', async () => {
     initTheme();
+    await loadVerbs();
+    await checkPendingSession();
     initEventListeners();
 });
 
@@ -32,9 +34,28 @@ async function loadVerbs() {
         const res = await fetch('/api/verbs');
         allVerbs = await res.json();
         document.getElementById('verb-count-info').textContent =
-            `${allVerbs.length} verbes disponibles`;
+            `${allVerbs.length} verbes à réviser`;
     } catch (e) {
         console.error('Erreur chargement verbes:', e);
+    }
+}
+
+/**
+ * Vérifie s'il y a une session en pause.
+ */
+async function checkPendingSession() {
+    try {
+        const res = await fetch('/api/sessions/pending');
+        const session = await res.json();
+        if (session && session.pause_state) {
+            const state = session.pause_state;
+            const remaining = state.poolIds ? state.poolIds.length : 0;
+            document.getElementById('resume-section').style.display = 'block';
+            document.getElementById('resume-info').textContent =
+                `Round ${state.roundNumber} — ${remaining} verbe${remaining > 1 ? 's' : ''} restant${remaining > 1 ? 's' : ''}`;
+        }
+    } catch (e) {
+        console.error('Erreur vérification session:', e);
     }
 }
 
@@ -56,7 +77,12 @@ function initEventListeners() {
     document.getElementById('btn-next-round').addEventListener('click', startRound);
     document.getElementById('btn-restart').addEventListener('click', () => {
         showScreen('screen-start');
+        checkPendingSession();
     });
+    document.getElementById('btn-pause').addEventListener('click', pauseSession);
+
+    const btnResume = document.getElementById('btn-resume');
+    if (btnResume) btnResume.addEventListener('click', resumeSession);
 }
 
 /**
@@ -78,7 +104,6 @@ function showScreen(screenId) {
     document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
     const screen = document.getElementById(screenId);
     screen.classList.remove('active');
-    // Force reflow pour relancer l'animation
     void screen.offsetWidth;
     screen.classList.add('active');
 }
@@ -86,22 +111,103 @@ function showScreen(screenId) {
 // === QUIZ ===
 
 /**
- * Démarre un nouveau quiz avec les paramètres sélectionnés.
+ * Démarre un nouveau quiz : tous les verbes, mode aléatoire.
  */
-function startQuiz() {
-    const count = parseInt(document.getElementById('verb-count').value);
-    const mode = document.getElementById('quiz-mode').value;
-    settings = { count, mode };
-
+async function startQuiz() {
     roundNumber = 0;
     globalCorrect = 0;
     globalTotal = 0;
+    errorTracker = {};
 
-    // Sélectionner les verbes aléatoirement
-    const shuffled = [...allVerbs].sort(() => Math.random() - 0.5);
-    pool = count === 0 ? shuffled : shuffled.slice(0, count);
+    // Tous les verbes, mélangés
+    pool = [...allVerbs].sort(() => Math.random() - 0.5);
+
+    // Créer une session côté serveur
+    try {
+        const res = await fetch('/api/sessions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: 'random', total_verbs: pool.length })
+        });
+        const data = await res.json();
+        sessionId = data.id;
+    } catch (e) {
+        console.error('Erreur création session:', e);
+        sessionId = null;
+    }
 
     startRound();
+}
+
+/**
+ * Reprend une session en pause.
+ */
+async function resumeSession() {
+    try {
+        const res = await fetch('/api/sessions/pending');
+        const session = await res.json();
+        if (!session || !session.pause_state) return;
+
+        const state = session.pause_state;
+        sessionId = session.id;
+        roundNumber = state.roundNumber || 1;
+        globalCorrect = state.globalCorrect || 0;
+        globalTotal = state.globalTotal || 0;
+        errorTracker = state.errorTracker || {};
+        roundCorrect = state.roundCorrect || 0;
+        currentIndex = state.currentIndex || 0;
+
+        // Reconstruire le pool à partir des IDs sauvegardés
+        const poolIds = state.poolIds || [];
+        pool = poolIds.map(id => allVerbs.find(v => v.id === id)).filter(Boolean);
+        roundTotal = pool.length;
+
+        // Reconstruire la retryList
+        const retryIds = state.retryIds || [];
+        retryList = retryIds.map(id => allVerbs.find(v => v.id === id)).filter(Boolean);
+
+        showScreen('screen-quiz');
+        nextVerb();
+    } catch (e) {
+        console.error('Erreur reprise session:', e);
+    }
+}
+
+/**
+ * Met en pause la session et sauvegarde l'état.
+ */
+async function pauseSession() {
+    if (!sessionId) return;
+
+    const totalErrors = Object.values(errorTracker).reduce((a, b) => a + b, 0);
+    const state = {
+        roundNumber,
+        globalCorrect,
+        globalTotal,
+        errorTracker,
+        roundCorrect,
+        currentIndex,
+        poolIds: pool.map(v => v.id),
+        retryIds: retryList.map(v => v.id)
+    };
+
+    try {
+        await fetch(`/api/sessions/${sessionId}/pause`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                state,
+                total_correct: globalCorrect,
+                total_errors: totalErrors,
+                rounds: roundNumber
+            })
+        });
+    } catch (e) {
+        console.error('Erreur pause session:', e);
+    }
+
+    showScreen('screen-start');
+    checkPendingSession();
 }
 
 /**
@@ -114,7 +220,6 @@ function startRound() {
     roundCorrect = 0;
     roundTotal = pool.length;
 
-    // Mélanger le pool
     pool.sort(() => Math.random() - 0.5);
 
     showScreen('screen-quiz');
@@ -131,7 +236,7 @@ function nextVerb() {
     }
 
     const verb = pool[currentIndex];
-    currentQuestion = generateQuestion(verb, settings.mode);
+    currentQuestion = generateQuestion(verb);
     answered = false;
 
     renderQuestion(currentQuestion);
@@ -139,25 +244,16 @@ function nextVerb() {
 }
 
 /**
- * Génère une question à partir d'un verbe et d'un mode.
+ * Génère une question à partir d'un verbe (mode toujours aléatoire).
  */
-function generateQuestion(verb, mode) {
-    let questionType;
-
-    if (mode === 'complete') {
-        questionType = 'french_to_all';
-    } else if (mode === 'preterit') {
-        questionType = 'infinitive_to_past';
-    } else {
-        // Aléatoire : choisir un type au hasard
-        const types = [
-            'french_to_all',
-            'infinitive_to_past',
-            'past_to_others',
-            'participle_to_others'
-        ];
-        questionType = types[Math.floor(Math.random() * types.length)];
-    }
+function generateQuestion(verb) {
+    const types = [
+        'french_to_all',
+        'infinitive_to_past',
+        'past_to_others',
+        'participle_to_others'
+    ];
+    const questionType = types[Math.floor(Math.random() * types.length)];
 
     switch (questionType) {
         case 'french_to_all':
@@ -231,16 +327,13 @@ function renderQuestion(question) {
         fieldsContainer.appendChild(div);
     });
 
-    // Bouton valider
     const btn = document.getElementById('btn-validate');
     btn.textContent = 'Valider';
     btn.className = 'btn btn-primary';
 
-    // Focus sur le premier champ
     const firstInput = fieldsContainer.querySelector('input');
     if (firstInput) setTimeout(() => firstInput.focus(), 100);
 
-    // Gestion du Enter dans les champs
     fieldsContainer.querySelectorAll('input').forEach((input, i, inputs) => {
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
@@ -256,7 +349,6 @@ function renderQuestion(question) {
         });
     });
 
-    // Animation d'entrée
     const card = document.getElementById('quiz-card');
     card.style.animation = 'none';
     void card.offsetWidth;
@@ -282,13 +374,11 @@ function updateProgress() {
  */
 function handleValidate() {
     if (answered) {
-        // Passer au verbe suivant
         currentIndex++;
         nextVerb();
         return;
     }
 
-    // Vérifier les réponses
     const fields = document.querySelectorAll('#quiz-fields input');
     let allCorrect = true;
 
@@ -304,7 +394,6 @@ function handleValidate() {
         } else {
             allCorrect = false;
             input.classList.add('wrong');
-            // Afficher la correction
             const correction = document.createElement('div');
             correction.className = 'field-correction';
             correction.innerHTML = `Réponse : <span>${expected}</span>`;
@@ -323,7 +412,6 @@ function handleValidate() {
         card.classList.add('correct-flash');
         setTimeout(() => card.classList.remove('correct-flash'), 500);
 
-        // Auto-avancer après 800ms si tout est correct
         const btn = document.getElementById('btn-validate');
         btn.textContent = 'Suivant';
         setTimeout(() => {
@@ -333,7 +421,9 @@ function handleValidate() {
             }
         }, 800);
     } else {
-        // Ajouter le verbe à la liste de retry
+        const verbId = currentQuestion.verb.id;
+        errorTracker[verbId] = (errorTracker[verbId] || 0) + 1;
+
         retryList.push(currentQuestion.verb);
         card.classList.add('shake');
         setTimeout(() => card.classList.remove('shake'), 400);
@@ -351,10 +441,7 @@ function checkAnswer(answer, expected) {
     const normalizedAnswer = answer.trim().toLowerCase();
     if (!normalizedAnswer) return false;
 
-    // Séparer les alternatives (ex: "was / were" → ["was", "were"])
     const alternatives = expected.toLowerCase().split('/').map(s => s.trim());
-
-    // Accepter n'importe quelle alternative valide
     return alternatives.some(alt => alt === normalizedAnswer);
 }
 
@@ -362,16 +449,13 @@ function checkAnswer(answer, expected) {
  * Termine le round actuel et affiche les résultats.
  */
 function endRound() {
-    // Mettre à jour la barre de progression à 100%
     document.getElementById('progress-fill').style.width = '100%';
 
     if (retryList.length === 0) {
-        // Victoire !
         showVictory();
         return;
     }
 
-    // Afficher le résumé du round
     document.getElementById('round-result-title').textContent =
         `Round ${roundNumber} terminé !`;
     document.getElementById('round-result-score').textContent =
@@ -385,7 +469,6 @@ function endRound() {
             `Plus que ${retryList.length} verbes à revoir !`;
     }
 
-    // Liste des verbes à revoir
     const listEl = document.getElementById('retry-verbs-list');
     listEl.innerHTML = '';
     retryList.forEach(verb => {
@@ -395,16 +478,15 @@ function endRound() {
         listEl.appendChild(tag);
     });
 
-    // Préparer le pool pour le prochain round
     pool = [...retryList];
-
     showScreen('screen-round-end');
 }
 
 /**
- * Affiche l'écran de victoire avec confettis.
+ * Affiche l'écran de victoire et enregistre la session.
  */
-function showVictory() {
+async function showVictory() {
+    const totalErrors = Object.values(errorTracker).reduce((a, b) => a + b, 0);
     const accuracy = globalTotal > 0
         ? Math.round((globalCorrect / globalTotal) * 100)
         : 100;
@@ -415,6 +497,27 @@ function showVictory() {
 
     showScreen('screen-victory');
     launchConfetti();
+
+    if (sessionId) {
+        try {
+            const errors = Object.entries(errorTracker).map(([verbId, count]) => ({
+                verb_id: parseInt(verbId),
+                count
+            }));
+            await fetch(`/api/sessions/${sessionId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    total_correct: globalCorrect,
+                    total_errors: totalErrors,
+                    rounds: roundNumber,
+                    errors
+                })
+            });
+        } catch (e) {
+            console.error('Erreur enregistrement session:', e);
+        }
+    }
 }
 
 /**

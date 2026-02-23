@@ -801,6 +801,85 @@ body {
     box-shadow: var(--shadow);
 }
 
+/* === Retry verbs (fin de round) === */
+.retry-verb-row {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 8px 16px;
+    background: var(--bg);
+    border-radius: var(--radius-sm);
+    margin-bottom: 6px;
+}
+
+.retry-verb-french {
+    font-size: 13px;
+    color: var(--text-light);
+    font-weight: 500;
+}
+
+.retry-verb-forms {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--primary);
+}
+
+/* === Victory errors recap === */
+.victory-errors {
+    width: 100%;
+    margin-bottom: 24px;
+}
+
+.victory-errors h3 {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 12px;
+}
+
+.errors-recap {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.error-recap-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--bg);
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+}
+
+.error-recap-french {
+    color: var(--text-light);
+    font-weight: 500;
+    min-width: 80px;
+}
+
+.error-recap-forms {
+    flex: 1;
+    font-weight: 600;
+    color: var(--primary);
+}
+
+.error-recap-count {
+    color: var(--danger);
+    font-weight: 700;
+    font-size: 14px;
+    white-space: nowrap;
+}
+
+.perfect-score {
+    color: var(--success);
+    font-weight: 600;
+    font-size: 15px;
+    padding: 12px;
+}
+
 /* === Confetti === */
 .confetti-container {
     position: fixed;

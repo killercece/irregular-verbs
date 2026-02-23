@@ -1,6 +1,7 @@
 /**
  * Irregular Verbs Quiz
  * Logique du quiz avec système de rounds, tracking et pause/reprise
+ * Pas de correction affichée pendant le quiz — résultats en fin de session
  */
 
 // === ÉTAT ===
@@ -17,6 +18,7 @@ let globalTotal = 0;
 let answered = false;
 let sessionId = null;
 let errorTracker = {}; // { verb_id: count }
+let advancing = false; // anti-double clic pendant auto-avance
 
 // === INITIALISATION ===
 document.addEventListener('DOMContentLoaded', async () => {
@@ -49,10 +51,14 @@ async function checkPendingSession() {
         const session = await res.json();
         if (session && session.pause_state) {
             const state = session.pause_state;
-            const remaining = state.poolIds ? state.poolIds.length : 0;
+            const remaining = state.poolIds
+                ? state.poolIds.length - (state.currentIndex || 0)
+                : 0;
             document.getElementById('resume-section').style.display = 'block';
             document.getElementById('resume-info').textContent =
                 `Round ${state.roundNumber} — ${remaining} verbe${remaining > 1 ? 's' : ''} restant${remaining > 1 ? 's' : ''}`;
+        } else {
+            document.getElementById('resume-section').style.display = 'none';
         }
     } catch (e) {
         console.error('Erreur vérification session:', e);
@@ -108,6 +114,33 @@ function showScreen(screenId) {
     screen.classList.add('active');
 }
 
+// === SAUVEGARDE AUTO ===
+
+/**
+ * Sauvegarde automatique de l'état après chaque verbe.
+ */
+function autoSave() {
+    if (!sessionId) return;
+    const totalErrors = Object.values(errorTracker).reduce((a, b) => a + b, 0);
+    const state = {
+        roundNumber, globalCorrect, globalTotal, errorTracker,
+        roundCorrect, currentIndex,
+        poolIds: pool.map(v => v.id),
+        retryIds: retryList.map(v => v.id)
+    };
+    // Fire and forget — pas de await pour ne pas ralentir le quiz
+    fetch(`/api/sessions/${sessionId}/pause`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            state,
+            total_correct: globalCorrect,
+            total_errors: totalErrors,
+            rounds: roundNumber
+        })
+    }).catch(() => {});
+}
+
 // === QUIZ ===
 
 /**
@@ -119,10 +152,8 @@ async function startQuiz() {
     globalTotal = 0;
     errorTracker = {};
 
-    // Tous les verbes, mélangés
     pool = [...allVerbs].sort(() => Math.random() - 0.5);
 
-    // Créer une session côté serveur
     try {
         const res = await fetch('/api/sessions', {
             method: 'POST',
@@ -157,12 +188,10 @@ async function resumeSession() {
         roundCorrect = state.roundCorrect || 0;
         currentIndex = state.currentIndex || 0;
 
-        // Reconstruire le pool à partir des IDs sauvegardés
         const poolIds = state.poolIds || [];
         pool = poolIds.map(id => allVerbs.find(v => v.id === id)).filter(Boolean);
         roundTotal = pool.length;
 
-        // Reconstruire la retryList
         const retryIds = state.retryIds || [];
         retryList = retryIds.map(id => allVerbs.find(v => v.id === id)).filter(Boolean);
 
@@ -174,38 +203,11 @@ async function resumeSession() {
 }
 
 /**
- * Met en pause la session et sauvegarde l'état.
+ * Met en pause la session manuellement et revient à l'accueil.
  */
 async function pauseSession() {
     if (!sessionId) return;
-
-    const totalErrors = Object.values(errorTracker).reduce((a, b) => a + b, 0);
-    const state = {
-        roundNumber,
-        globalCorrect,
-        globalTotal,
-        errorTracker,
-        roundCorrect,
-        currentIndex,
-        poolIds: pool.map(v => v.id),
-        retryIds: retryList.map(v => v.id)
-    };
-
-    try {
-        await fetch(`/api/sessions/${sessionId}/pause`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                state,
-                total_correct: globalCorrect,
-                total_errors: totalErrors,
-                rounds: roundNumber
-            })
-        });
-    } catch (e) {
-        console.error('Erreur pause session:', e);
-    }
-
+    autoSave();
     showScreen('screen-start');
     checkPendingSession();
 }
@@ -230,6 +232,8 @@ function startRound() {
  * Passe au verbe suivant ou termine le round.
  */
 function nextVerb() {
+    advancing = false;
+
     if (currentIndex >= pool.length) {
         endRound();
         return;
@@ -241,6 +245,17 @@ function nextVerb() {
 
     renderQuestion(currentQuestion);
     updateProgress();
+}
+
+/**
+ * Avance au verbe suivant et sauvegarde.
+ */
+function advance() {
+    if (advancing) return;
+    advancing = true;
+    currentIndex++;
+    autoSave();
+    nextVerb();
 }
 
 /**
@@ -339,7 +354,7 @@ function renderQuestion(question) {
             if (e.key === 'Enter') {
                 e.preventDefault();
                 if (answered) {
-                    handleValidate();
+                    advance();
                 } else if (i < inputs.length - 1) {
                     inputs[i + 1].focus();
                 } else {
@@ -364,18 +379,16 @@ function updateProgress() {
         `Verbe ${currentIndex + 1} / ${pool.length}`;
     document.getElementById('progress-fill').style.width =
         `${((currentIndex) / pool.length) * 100}%`;
-    document.getElementById('score-correct').textContent = `${roundCorrect} correct`;
-    document.getElementById('score-wrong').textContent =
-        `${currentIndex - roundCorrect} erreur${(currentIndex - roundCorrect) !== 1 ? 's' : ''}`;
+    // Pas de score affiché pendant le quiz — résultat en fin de session uniquement
 }
 
 /**
- * Gère le clic sur Valider / Suivant.
+ * Gère le clic sur Valider.
+ * Pas de correction affichée — juste vert/rouge puis auto-avance.
  */
 function handleValidate() {
     if (answered) {
-        currentIndex++;
-        nextVerb();
+        advance();
         return;
     }
 
@@ -388,60 +401,42 @@ function handleValidate() {
         const correct = checkAnswer(answer, expected);
 
         input.disabled = true;
+        // Aucun feedback visuel — l'élève ne sait pas s'il a bon ou faux
 
-        if (correct) {
-            input.classList.add('correct');
-        } else {
+        if (!correct) {
             allCorrect = false;
-            input.classList.add('wrong');
-            const correction = document.createElement('div');
-            correction.className = 'field-correction';
-            correction.innerHTML = `Réponse : <span>${expected}</span>`;
-            input.parentElement.appendChild(correction);
         }
     });
 
     answered = true;
     globalTotal++;
 
-    const card = document.getElementById('quiz-card');
-
     if (allCorrect) {
         roundCorrect++;
         globalCorrect++;
-        card.classList.add('correct-flash');
-        setTimeout(() => card.classList.remove('correct-flash'), 500);
-
-        const btn = document.getElementById('btn-validate');
-        btn.textContent = 'Suivant';
-        setTimeout(() => {
-            if (answered) {
-                currentIndex++;
-                nextVerb();
-            }
-        }, 800);
     } else {
         const verbId = currentQuestion.verb.id;
         errorTracker[verbId] = (errorTracker[verbId] || 0) + 1;
-
         retryList.push(currentQuestion.verb);
-        card.classList.add('shake');
-        setTimeout(() => card.classList.remove('shake'), 400);
-
-        const btn = document.getElementById('btn-validate');
-        btn.textContent = 'Suivant';
     }
+
+    // Auto-avance rapide — pas de feedback
+    setTimeout(() => {
+        if (answered) advance();
+    }, 300);
 }
 
 /**
  * Vérifie si une réponse est correcte.
  * Gère les alternatives séparées par " / ".
+ * Tolérant : insensible à la casse, aux espaces multiples, aux accents.
  */
 function checkAnswer(answer, expected) {
-    const normalizedAnswer = answer.trim().toLowerCase();
+    const normalize = s => s.trim().toLowerCase().replace(/\s+/g, ' ');
+    const normalizedAnswer = normalize(answer);
     if (!normalizedAnswer) return false;
 
-    const alternatives = expected.toLowerCase().split('/').map(s => s.trim());
+    const alternatives = expected.split('/').map(s => normalize(s));
     return alternatives.some(alt => alt === normalizedAnswer);
 }
 
@@ -450,6 +445,7 @@ function checkAnswer(answer, expected) {
  */
 function endRound() {
     document.getElementById('progress-fill').style.width = '100%';
+    autoSave();
 
     if (retryList.length === 0) {
         showVictory();
@@ -469,13 +465,17 @@ function endRound() {
             `Plus que ${retryList.length} verbes à revoir !`;
     }
 
+    // Afficher les verbes ratés AVEC les corrections (fin de round = feedback)
     const listEl = document.getElementById('retry-verbs-list');
     listEl.innerHTML = '';
     retryList.forEach(verb => {
-        const tag = document.createElement('span');
-        tag.className = 'retry-verb-tag';
-        tag.textContent = `${verb.infinitive} (${verb.french})`;
-        listEl.appendChild(tag);
+        const row = document.createElement('div');
+        row.className = 'retry-verb-row';
+        row.innerHTML = `
+            <span class="retry-verb-french">${verb.french}</span>
+            <span class="retry-verb-forms">${verb.infinitive} — ${verb.past_simple} — ${verb.past_participle}</span>
+        `;
+        listEl.appendChild(row);
     });
 
     pool = [...retryList];
@@ -495,9 +495,36 @@ async function showVictory() {
     document.getElementById('victory-correct').textContent = globalCorrect;
     document.getElementById('victory-accuracy').textContent = `${accuracy}%`;
 
+    // Afficher le récap des erreurs de toute la session
+    const errorsEl = document.getElementById('victory-errors');
+    if (errorsEl) {
+        const errorVerbIds = Object.keys(errorTracker);
+        if (errorVerbIds.length > 0) {
+            errorsEl.innerHTML = '<h3>Verbes à retravailler</h3>';
+            const table = document.createElement('div');
+            table.className = 'errors-recap';
+            errorVerbIds.forEach(id => {
+                const verb = allVerbs.find(v => v.id === parseInt(id));
+                if (!verb) return;
+                const row = document.createElement('div');
+                row.className = 'error-recap-row';
+                row.innerHTML = `
+                    <span class="error-recap-french">${verb.french}</span>
+                    <span class="error-recap-forms">${verb.infinitive} — ${verb.past_simple} — ${verb.past_participle}</span>
+                    <span class="error-recap-count">${errorTracker[id]}&times;</span>
+                `;
+                table.appendChild(row);
+            });
+            errorsEl.appendChild(table);
+        } else {
+            errorsEl.innerHTML = '<p class="perfect-score">Aucune erreur, parfait !</p>';
+        }
+    }
+
     showScreen('screen-victory');
     launchConfetti();
 
+    // Enregistrer la session terminée côté serveur
     if (sessionId) {
         try {
             const errors = Object.entries(errorTracker).map(([verbId, count]) => ({
